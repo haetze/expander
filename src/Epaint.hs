@@ -76,6 +76,7 @@ data Solver = Solver
     , getSolver       :: Request String -- ^ Returns name of this solver object.
     , getText         :: Request String -- ^ Returns content of text area.
     , getFont         :: Request FontDescription
+    , getPicNo        :: Request Int
     , getSignatureR   :: Request Sig
     , getTree         :: Request (Maybe TermS)
     , iconify         :: Action -- ^ Minimize solver window.
@@ -90,7 +91,7 @@ data Solver = Solver
     -- ^ Shows a 'String' in the left label
     -- and set the label background to green.
     , narrow          :: Action
-    , saveGraphDP     :: Bool -> Canvas -> Action
+    , saveGraphDP     :: Bool -> Canvas -> Int -> Action
     , setCurrInSolve  :: Int -> Action
     , setForw         :: ButtonOpts -> Action
     , setQuit         :: ButtonOpts -> Action
@@ -103,23 +104,23 @@ data Solver = Solver
   
   
 data Step = ApplySubst | ApplySubstTo String TermS | ApplyTransitivity | 
-            BuildKripke Int | CollapseStep | ComposePointers | 
+            BuildKripke Int | BuildRE | CollapseStep | ComposePointers |
             CopySubtrees | CreateIndHyp | CreateInvariant Bool | 
             DecomposeAtom | DeriveMode Bool Bool | EvaluateTrees | 
             ExpandTree Bool Int | FlattenImpl | Generalize [TermS] | 
-            Induction Bool Int | Mark [[Int]] | Match Int | Minimize | 
-            Narrow Int Bool | NegateAxioms [String] [String] | RandomLabels | 
-            RandomTree | ReduceRE Bool | ReleaseNode | ReleaseSubtree |
-            ReleaseTree | RemoveCopies | RemoveEdges Bool | RemoveNode |
-            RemoveOthers | RemovePath | RemoveSubtrees | RenameVar String | 
-            ReplaceNodes String | ReplaceOther | 
+            Induction Bool Int [String] | Mark [[Int]] | Match Int | Minimize |
+            ModifyEqs Int | Narrow Int Bool | NegateAxioms [String] [String] |
+            RandomLabels | RandomTree | ReduceRE Int | ReleaseNode |
+            ReleaseSubtree | ReleaseTree | RemoveCopies | RemoveEdges Bool |
+            RemoveNode | RemoveOthers | RemovePath | RemoveSubtrees |
+            RenameVar String | ReplaceNodes String | ReplaceOther |
             ReplaceSubtrees [[Int]] [TermS] | ReplaceText String | 
             ReplaceVar String TermS [Int] | ReverseSubtrees | SafeEqs | 
             SetAdmitted Bool [String] | SetCurr String Int | SetDeriveMode | 
             SetMatch | ShiftPattern | ShiftQuants | ShiftSubs [[Int]] | 
             Simplify Bool Int Bool | SplitTree | StretchConclusion | 
             StretchPremise | SubsumeSubtrees | Theorem Bool TermS | 
-            UnifySubtrees | POINTER Step
+            Transform Int | UnifySubtrees | POINTER Step
             deriving Show
 
 data Runner = Runner
@@ -653,7 +654,7 @@ painter pheight solveRef solve2Ref = do
             font <- fontDescriptionFromString $ monospace ++ " 14"
             widgetOverrideFont saveEnt $ Just font
             
-            saveDBut `on` buttonActivated $ saveGraphDP solve False canv
+            saveDBut `on` buttonActivated $ saveGraphD
             
             scaleSlider `on` valueChanged $ moveScale
             scaleSlider `on` buttonPressEvent $ do
@@ -1380,52 +1381,54 @@ painter pheight solveRef solve2Ref = do
                 edges <- readIORef edgesRef
                 rectIndices <- readIORef rectIndicesRef
                 rscale <- readIORef rscaleRef
+                filePath <- pixpath file
+                usr <- userLib file
                 let graph@(pict,arcs) = (pictures!!curr,edges!!curr)
                     (pict1,arcs1) = subgraph graph rectIndices
                     pict2 = scalePict rscale pict1
                     (x,y,_,_) = pictFrame pict2
                     pict3 = map (transXY (-x,-y)) pict2
                     lg = length file
-                
+                    (prefix,suffix) = splitAt (lg-4) file
+                    write = writeFile usr
+                    msg str = labGreen $ savedCode str usr
+                    act1 = mkHtml canv prefix filePath
+                    act2 n = do writeIORef currRef n
+                                pictSlider `Gtk.set`
+                                      [ rangeValue := fromIntegral n ]
+                                remoteDraw
+                                delay 100 $ act1 n
+                                return ()
                 if null file then labRed' "Enter a file name!"
                 else do
-                  let (prefix,suffix) = splitExtension file
-                      dir = if lg > 4 && suffix `elem` words ".eps .png .gif"
-                            then prefix else ""
-                  dirPath <- pixpath dir
-                  if null dir then do
-                    rect <- readIORef rectRef
-                    filePath <- userLib file
-                    let msg str = labGreen $ savedCode str filePath
-                    if isJust rect then
-                      case pict3 of 
-                        [w] -> do
-                          let f (_,_,c,_) = st0 c
-                          writeFile filePath $ show $ updState f w
-                          msg "widget"
-                        _ -> do
-                          writeFile filePath $ show (pict3,arcs1)
-                          msg "selection"
-                    else do
-                      scale <- readIORef scaleRef
-                      writeFile filePath $ show (scalePict scale pict,arcs)
-                      msg "entire graph"
-                  else case pictures of 
-                     [_] -> do
-                       savePic suffix canv dirPath
-                       labGreen $ saved "graph" file
-                     _ -> do
-                       renewDir dirPath
-                       let f n = do writeIORef currRef n
-                                    pictSlider `Gtk.set`
-                                      [ rangeValue := fromIntegral n ]
-                                    remoteDraw
-                                    let act = mkHtml canv dir dirPath n
-                                    delay 100 act; return ()
-                       saver <- runner2 f $ length pictures-1
-                       startRun saver 500
-                       labGreen $ saved "graphs" $ dirPath <.> "html"
-            
+                   if lg < 5 || suffix `notElem` words ".eps .png .gif" then do
+                      rect <- readIORef rectRef
+                      if just rect then
+                         case pict3 of
+                           [w] -> do write $ show $ updState st w; msg "widget"
+                           _   -> do write $ show (pict3,arcs1); msg "selection"
+                      else do
+                           scale <- readIORef scaleRef
+                           write $ show (scalePict scale pict,arcs)
+                           msg "entire graph"
+                   else case pictures of
+                        [_] -> do
+                               file <- savePic suffix canv filePath
+                               labGreen $ saved "graph" file
+                        _   -> do
+                               renewDir filePath
+                               saver <- runner2 act2 $ length pictures-1
+                               (saver&startRun) 500
+                               labGreen $ saved "graphs" $ filePath ++ ".html"
+           where st (_,_,c,_) = st0 c
+
+        saveGraphD = do
+          solve <- readIORef solveRef
+          str <- saveEnt `Gtk.get` entryText
+          picNo <- (solve&getPicNo)
+          (solve&saveGraphDP) False canv $ case parse nat str of Just n -> n
+                                                                 _ -> picNo
+
         scaleAndDraw msg = do
             scans <- readIORef scansRef
             mapM_ stopScan0 scans
@@ -2395,34 +2398,33 @@ linearEqsT sizes _ = f where
 matrixT sizes spread = f where
         f :: TermS -> MaybeT Cmd Picture
         f (Hidden (BoolMat dom1 dom2 pairs@(_:_))) 
-                         = rturtle $ matrixBool sizes dom1 dom2 $ deAssoc0 pairs
-        f (Hidden (ListMat dom1 dom2 trips@(_:_))) 
-                         = rturtle $ matrixList sizes dom1 dom $ map g trips 
-                           where g (a,b,cs) = (a,b,map leaf cs)
-                                 dom = mkSet [b | (_,b,_:_) <- trips]
-        f (Hidden (ListMatL dom trips@(_:_))) 
-                              = rturtle $ matrixList sizes dom dom $ map g trips
-                                where g (a,b,cs) = (a,b,map mkStrLPair cs)
-        f t | just u          = do bins@(bin:_) <- lift' u
-                                   let (arr,k,m) = karnaugh (length bin)
-                                       g = binsToBinMat bins arr
-                                       ts = [(show i,show j,F (g i j) [])  
+                            = rturtle $ matrixBool sizes dom1 dom2 pairs
+        f (Hidden (ListMat dom1 dom2@(_:_) trips))
+                            = rturtle $ matrixList sizes dom1 dom2 $ map g trips
+                              where g (a,b,cs) = (a,b,map leaf cs)
+        f (Hidden (ListMatL dom trips@(_:_)))
+                            = rturtle $ matrixList sizes dom dom $ map g trips
+                              where g (a,b,cs) = (a,b,map mkStrLPair cs)
+        f t | just u         = do bins@(bin:_) <- lift' u
+                                  let (arr,k,m) = karnaugh (length bin)
+                                      g = binsToBinMat bins arr
+                                      ts = [(show i,show j,F (g i j) [])
                                                      | i <- [1..k], j <- [1..m]]
-                                   rturtle $ matrixTerm sizes ts
-                                where u = parseBins t
-        f (F _ [])            = mzero
-        f (F "pict" ts)       = do ts <- mapM (lift' . parseConsts2Term) ts
-                                   rturtle $ matrixWidget sizes spread 
-                                           $ deAssoc3 ts
-        f (F _ ts) | just us  = rturtle $ matrixBool sizes dom1 dom2 ps
-                                where us = mapM parseConsts2 ts
-                                      ps = deAssoc2 $ get us
-                                      (dom1,dom2) = sortDoms ps
-        f (F _ ts) | isJust us= rturtle $ matrixList sizes dom1 dom2 trs 
-                                where us = mapM parseConsts2Terms ts
-                                      trs = deAssoc3 $ get us
-                                      (dom1,dom2) = sortDoms2 trs
-        f _                   = mzero
+                                  rturtle $ matrixTerm sizes ts
+                               where u = parseBins t
+        f (F _ [])           = mzero
+        f (F "pict" ts)      = do ts <- mapM (lift' . parseConsts2Term) ts
+                                  rturtle $ matrixWidget sizes spread
+                                          $ deAssoc3 ts
+        f (F _ ts) | just us = rturtle $ matrixBool sizes dom1 dom2 ps
+                               where us = mapM parseConsts2 ts
+                                     ps = deAssoc2 $ get us
+                                     (dom1,dom2) = sortDoms ps
+        f (F _ ts) | just us = rturtle $ matrixList sizes dom1 dom2 trs
+                               where us = mapM parseConsts2Terms ts
+                                     trs = deAssoc3 $ get us
+                                     (dom1,dom2) = sortDoms2 trs
+        f _                  = mzero
 
 widgetTreeT sizes spread t = do t <- f [] t; return [WTree t] where
         f :: [Int] -> TermS -> MaybeT Cmd TermW
@@ -2704,8 +2706,9 @@ widgetsC c sizes@(n,width) spread t = f t where
         f (F "taichi" s)       = jturtle $ taichi sizes s c
         f (F "text" ts)        = do guard $ notnull strs
                                     Just [Text_ (st0 c) n strs $ map width strs]
-                                 where strs = words $ showTree False 
-                                                    $ colHidden $ mkTup ts
+                                 where strs = map (map h) $ words $ showTree
+                                              False $ colHidden $ mkTup ts
+                                       h x = if x == '\'' then ' ' else x
         f (F "tree" [t])       = Just [Tree st0B n c $ mapT h ct]
                                  where ct = coordTree width spread 
                                                       (20,20) $ colHidden t
@@ -4274,8 +4277,8 @@ matrixBool sizes@(n,width) dom1 dom2 ps =
                             btf j = halfmax width [j]+3
                             ht = fromInt n/2+3
 
-matrixList :: Sizes -> [String] -> [String] -> [(String,String,[TermS])] 
-                     -> TurtleActs
+matrixList :: Sizes -> [String] -> [String] -> Triples String TermS
+                    -> TurtleActs
 matrixList sizes@(n,width) dom1 dom2 ts = 
             rectMatrix sizes entry dom1 dom2 btf htf
             where entry i j = open:down:JumpA back:concatMap h (f i j)++[Close]
